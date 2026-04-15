@@ -1,100 +1,107 @@
 import socket
 import ssl
 import threading
+import datetime
 
 TCP_PORT = 9000
 UDP_PORT = 5005
 
-event_count = {}
+# Store last sequence per client
 last_seq = {}
+stats = {}
+last_event = {}
 
-# -------- EVENT CLASSIFICATION --------
-def classify_event(event):
-    if event == "CPU_THRESHOLD":
-        return "WARNING"
-    elif event == "PACKET_DROP":
-        return "CRITICAL"
-    elif event == "MEMORY_THRESHOLD":
-        return "WARNING"
-    else:
-        return "INFO"
-
-
-# -------- SSL AUTH SERVER --------
-def handle_client(conn, addr):
-    print(f"[SSL CONNECTED] {addr}")
-    try:
-        data = conn.recv(1024).decode()
-        print("Auth:", data)
-
-        conn.send("AUTH_SUCCESS".encode())
-
-    except Exception as e:
-        print("Error:", e)
-
-    finally:
-        conn.close()
-
-
-def start_ssl_server():
+# ---------------- TCP (SSL AUTH SERVER) ---------------- #
+def ssl_server():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain("certs/cert.pem", "certs/key.pem")
+
+    try:
+        context.load_cert_chain(certfile="certs/cert.pem", keyfile="certs/key.pem")
+    except Exception as e:
+        print("❌ SSL ERROR:", e)
+        return
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
     sock.bind(("0.0.0.0", TCP_PORT))
     sock.listen(5)
 
-    print("SSL Server running on port 9000")
+    print(f"🔐 SSL Server running on port {TCP_PORT}")
 
     while True:
-        client, addr = sock.accept()
-        conn = context.wrap_socket(client, server_side=True)
+        client_sock, addr = sock.accept()
+        try:
+            conn = context.wrap_socket(client_sock, server_side=True)
 
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+            data = conn.recv(1024).decode()
+            print(f"[SSL CONNECTED] {addr} -> {data}")
+
+            conn.send("AUTH_SUCCESS".encode())
+            conn.close()
+
+        except Exception as e:
+            print("SSL Connection Error:", e)
 
 
-# -------- UDP SERVER --------
-def start_udp_server():
+# ---------------- UDP EVENT SERVER ---------------- #
+def udp_server():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
     sock.bind(("0.0.0.0", UDP_PORT))
-    print("UDP Server running on port 5005")
+
+    print(f"📡 UDP Server running on port {UDP_PORT}")
 
     while True:
         data, addr = sock.recvfrom(1024)
+        message = data.decode()
 
         try:
-            node, event, seq = data.decode().split("|")
+            node, event, seq = message.split("|")
             seq = int(seq)
 
-            # -------- PACKET LOSS --------
-            if node in last_seq:
-                if seq != last_seq[node] + 1:
-                    print(f"[LOSS] Packet loss detected for {node}")
+            time_now = datetime.datetime.now().strftime("%H:%M:%S")
+
+            # Packet loss detection
+            if node in last_seq and seq != last_seq[node] + 1:
+                print(f"[{time_now}] ❗ PACKET LOSS detected for Node {node}")
+                stats["PACKET_DROP"] = stats.get("PACKET_DROP", 0) + 1
 
             last_seq[node] = seq
 
-            # -------- CLASSIFICATION --------
-            severity = classify_event(event)
+            # Duplicate event filtering (avoid spam)
+            if node in last_event and last_event[node] == event:
+                continue
+            last_event[node] = event
 
-            # -------- AGGREGATION --------
-            event_count[event] = event_count.get(event, 0) + 1
+            # Classification
+            severity = "WARNING"
+            if event == "PACKET_DROP":
+                severity = "CRITICAL"
+            elif event == "CPU_THRESHOLD":
+                severity = "WARNING"
+            elif event == "MEMORY_OVERFLOW":
+                severity = "CRITICAL"
 
-            print(f"[EVENT] Node:{node} | Event:{event} | Severity:{severity}")
+            # Print event
+            print(f"[{time_now}] Node:{node} | Event:{event} | Severity:{severity}")
 
+            # Aggregation
+            stats[event] = stats.get(event, 0) + 1
+
+            # Save to log file
+            with open("log.txt", "a") as f:
+                f.write(f"{time_now},{node},{event},{severity}\n")
+
+            # Display stats
             print("---- Stats ----")
-            for e, count in event_count.items():
-                print(e, ":", count)
-            print("----------------")
+            for k, v in stats.items():
+                print(f"{k} : {v}")
 
-        except:
-            print("Invalid packet")
+        except Exception as e:
+            print("❌ Invalid message received:", message)
 
 
-# -------- MAIN --------
-if __name__ == "__main__":
-    threading.Thread(target=start_ssl_server, daemon=True).start()
-    start_udp_server()
+# ---------------- MAIN ---------------- #
+t1 = threading.Thread(target=ssl_server)
+t2 = threading.Thread(target=udp_server)
+
+t1.start()
+t2.start()
