@@ -1,24 +1,48 @@
-from OpenSSL import crypto
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+import datetime
+import os
 
-# Create key
-key = crypto.PKey()
-key.generate_key(crypto.TYPE_RSA, 2048)
+# Create certs folder if not exists
+os.makedirs("certs", exist_ok=True)
+
+# Generate private key
+key = rsa.generate_private_key(
+    public_exponent=65537,
+    key_size=2048
+)
+
+# Write key.pem
+with open("certs/key.pem", "wb") as f:
+    f.write(key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption()
+    ))
 
 # Create certificate
-cert = crypto.X509()
-cert.get_subject().CN = "localhost"
-cert.set_serial_number(1000)
-cert.gmtime_adj_notBefore(0)
-cert.gmtime_adj_notAfter(365*24*60*60)
-cert.set_issuer(cert.get_subject())
-cert.set_pubkey(key)
-cert.sign(key, 'sha256')
+subject = issuer = x509.Name([
+    x509.NameAttribute(NameOID.COUNTRY_NAME, u"IN"),
+    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Karnataka"),
+    x509.NameAttribute(NameOID.LOCALITY_NAME, u"Bangalore"),
+    x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Student Project"),
+    x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+])
 
-# Save files
+cert = x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(
+    key.public_key()
+).serial_number(
+    x509.random_serial_number()
+).not_valid_before(
+    datetime.datetime.utcnow()
+).not_valid_after(
+    datetime.datetime.utcnow() + datetime.timedelta(days=365)
+).sign(key, hashes.SHA256())
+
+# Write cert.pem
 with open("certs/cert.pem", "wb") as f:
-    f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+    f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-with open("certs/key.pem", "wb") as f:
-    f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, key))
-
-print("Certificates generated!")
+print("✅ Certificate generated successfully!")
